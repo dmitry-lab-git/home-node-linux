@@ -1,39 +1,26 @@
 # home-node-linux
 
-Server/WSL node of the **home-node** ecosystem for Linux. Acts as a bridge between network nodes/clients (such as `home-node-android`, and `home-node-ios` in the future) and PostgreSQL databases via the shared `core.db_connection` package.
+## Database and Connection (Vault)
 
-## Purpose and Role in the Ecosystem
+The service uses centralized secret storage in the `platform_meta` database (`vault` schema, AES-GCM encryption via `core/db_connection`) along with the local `db.py` helper and `psycopg_pool` connection pools. Local `.env` files are not used for database secrets.
 
-* **`home-node-android`** — local Android node (Ktor + Netty, Room, sync) that accepts external requests and coordinates device-level workflows.
-* **`home-node-linux`** — Linux/WSL node that owns the PostgreSQL access layer, reuses connection pools and credentials from `core.db_connection` (`platform_meta` Vault and legacy `.env`), and serves unified responses over shared API contracts.
-* **Future Nodes (`home-node-ios`, etc.)** — integrate into the ecosystem using the same protocols and contracts without duplicating database access logic.
+* **Database:** `household`
+* **Vault Project / User:** `home-node-linux`
+* **Mapping in `routes.py` (`PROJECT_VAULT_PROFILES`):** `household` -> `home-node-linux`, `traffic_tracker` -> `home-node-linux`
+* **Required Vault Keys:** `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`
+* **Legacy Fallback (when project is not found in Vault):** `~/Projects/secure_folder/vpn-dmitry-lab/.env.<project>`
 
-## Architectural Principles
+### Why Direct `db.py` Calls Worked While `/api/v1/projects/household/ping` Failed with `fe_sendauth: no password supplied`
 
-1. **Unified DB Access via `core.db_connection`** — no direct database connections bypassing shared connection pools and Vault.
-2. **Credential Isolation** — the Vault master key (`~/Projects/secure_folder/vault.yaml`), `platform_meta` access, and database credentials stay strictly on the `home-node-linux` side.
-3. **Shared Contracts** — versioned JSON schemas and consistent project/domain identifiers across all nodes.
+* Direct calls to `get_cursor("home-node-linux", "household")` in `db.py` queried the `home-node-linux` Vault profile directly, where all connection parameters (`PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER`, `PGPASSWORD`) were stored.
+* Previously, the `/api/v1/projects/{project}/ping` handler in `routes.py` passed the path parameter (`"household"`) directly to `ping_project(project)`. Because `"household"` had no separate Vault entry and `config.py` fell back to an empty password `""`, the connection pool in `db_connection` failed with `fe_sendauth: no password supplied`.
+* With `PROJECT_VAULT_PROFILES` configured in `routes.py`, requests to `/api/v1/projects/household/ping` resolve `household` -> `home-node-linux` and pass the `home-node-linux` profile to `ping_project`. Restart the server process after code or connection configuration changes so connection pools are recreated.
 
-## Project Structure (Initial Scaffold)
+### Provisioning Roles, Databases, and Vault Secrets
 
-- `README.md`
-- `pyproject.toml` (or `requirements.txt`)
-- `src/home_node_linux/__init__.py`
-- `src/home_node_linux/main.py` — HTTP server entry point
-- `src/home_node_linux/config.py` — host, port, timeouts, and allowed projects config
-- `src/home_node_linux/routes.py` — `/health`, `/api/v1/...` endpoints
-- `src/home_node_linux/bridge.py` — service layer over `core.db_connection`
-- `tests/`
+Use `~/Projects/core/db_connection/provision.sh` (with `.venv` active) to create or update the PostgreSQL role and database and write secrets into Vault:
 
-## Connecting `core.db_connection`
-
-The `core` package lives alongside this repository (e.g., `~/Projects/core`) and is installed into the `home-node-linux` virtual environment:
-
-    source .venv/bin/activate
-    pip install -e ~/Projects/core
-
-## Versioning
-
-This project follows Semantic Versioning (`SemVer`):
-* `v0.x.y` — initial development, core architecture, and early API contracts.
-* `v1.0.0` — stable inter-node communication contract across the `home-node` ecosystem.
+```bash
+cd ~/Projects/home-node-linux
+source .venv/bin/activate
+PG_HOST=localhost PG_PORT=5432 ~/Projects/core/db_connection/provision.sh
